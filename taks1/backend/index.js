@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
+const productRoutes = require('./routes/products');
 const task01Routes = require('./routes/task01');
 const task02Routes = require('./routes/task02');
 
@@ -17,6 +18,7 @@ app.get('/', (req, res) => {
 });
 
 // Mount modular routes
+app.use('/api/products', productRoutes);
 app.use('/api/task01', task01Routes);
 app.use('/api/task02', task02Routes);
 
