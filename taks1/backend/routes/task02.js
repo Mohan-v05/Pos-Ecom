@@ -3,7 +3,7 @@ const router = express.Router();
 const supabase = require('../supabaseClient');
 
 // ==========================================
-// ORDERS & ORDER ITEMS
+// ORDERS & ORDER ITEMS (ECOMMERCE CHANNEL)
 // ==========================================
 
 // CREATE: Create a new E-Commerce order with items
@@ -16,14 +16,16 @@ router.post('/orders', async (req, res) => {
 
   const total_amount = items.reduce((sum, item) => sum + (item.unit_price * item.quantity), 0);
 
+  // 1. Insert order with channel discriminator set to 'ECOMMERCE'
   const { data: order, error: orderError } = await supabase
-    .from('task02_orders')
-    .insert([{ user_id, total_amount, status: 'PENDING' }])
+    .from('orders')
+    .insert([{ user_id, channel: 'ECOMMERCE', total_amount, status: 'PENDING' }])
     .select()
     .single();
 
   if (orderError) return res.status(400).json({ error: orderError.message });
 
+  // 2. Insert order items linked to order ID
   const orderItemsPayload = items.map(item => ({
     order_id: order.id,
     product_id: item.product_id,
@@ -32,7 +34,7 @@ router.post('/orders', async (req, res) => {
   }));
 
   const { data: orderItems, error: itemsError } = await supabase
-    .from('task02_order_items')
+    .from('order_items')
     .insert(orderItemsPayload)
     .select();
 
@@ -44,23 +46,26 @@ router.post('/orders', async (req, res) => {
 // READ ALL: Get all E-Commerce orders with items
 router.get('/orders', async (req, res) => {
   const { data, error } = await supabase
-    .from('task02_orders')
-    .select('*, task02_order_items(*)');
+    .from('orders')
+    .select('*, order_items(*)')
+    .eq('channel', 'ECOMMERCE')
+    .order('created_at', { ascending: false });
 
   if (error) return res.status(400).json({ error: error.message });
   res.status(200).json(data);
 });
 
-// READ ONE: Get single E-Commerce order details with payments & refunds
+// READ ONE: Get single E-Commerce order details with payments, reservations & refunds
 router.get('/orders/:id', async (req, res) => {
   const { id } = req.params;
   const { data, error } = await supabase
-    .from('task02_orders')
-    .select('*, task02_order_items(*), task02_reservations(*), task02_payments(*), task02_refunds(*)')
+    .from('orders')
+    .select('*, order_items(*), reservations(*), payments(*), refunds(*)')
     .eq('id', id)
+    .eq('channel', 'ECOMMERCE')
     .single();
 
-  if (error) return res.status(404).json({ error: 'Order not found' });
+  if (error) return res.status(404).json({ error: 'E-Commerce order not found' });
   res.status(200).json(data);
 });
 
@@ -72,14 +77,23 @@ router.get('/orders/:id', async (req, res) => {
 router.post('/payments', async (req, res) => {
   const { order_id, idempotency_key, amount, status = 'SUCCESS' } = req.body;
 
-  const { data, error } = await supabase
-    .from('task02_payments')
+  const { data: payment, error: paymentError } = await supabase
+    .from('payments')
     .insert([{ order_id, idempotency_key, amount, status }])
     .select()
     .single();
 
-  if (error) return res.status(400).json({ error: error.message });
-  res.status(201).json(data);
+  if (paymentError) return res.status(400).json({ error: paymentError.message });
+
+  // Update order status if payment is successful
+  if (status === 'SUCCESS') {
+    await supabase
+      .from('orders')
+      .update({ status: 'PAID', updated_at: new Date().toISOString() })
+      .eq('id', order_id);
+  }
+
+  res.status(201).json(payment);
 });
 
 // ==========================================
@@ -91,7 +105,7 @@ router.post('/refunds', async (req, res) => {
   const { order_id, payment_id, amount, status = 'COMPLETED' } = req.body;
 
   const { data: refund, error: refundError } = await supabase
-    .from('task02_refunds')
+    .from('refunds')
     .insert([{ order_id, payment_id, amount, status }])
     .select()
     .single();
@@ -100,7 +114,7 @@ router.post('/refunds', async (req, res) => {
 
   // Update order status to REFUNDED
   await supabase
-    .from('task02_orders')
+    .from('orders')
     .update({ status: 'REFUNDED', updated_at: new Date().toISOString() })
     .eq('id', order_id);
 
