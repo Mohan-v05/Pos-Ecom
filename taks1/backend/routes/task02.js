@@ -11,7 +11,7 @@ router.post('/orders', async (req, res) => {
 });
 
 router.get('/orders', async (req, res) => {
-  let query = supabase.from('orders').select('*, order_items(*), payments(*), refunds(*)').eq('channel', 'ECOMMERCE').order('created_at', { ascending: false });
+  let query = supabase.from('orders').select('*, order_items(*, products(name)), payments(*), refunds(*)').eq('channel', 'ECOMMERCE').order('created_at', { ascending: false });
   if (req.query.user_id) query = query.eq('user_id', req.query.user_id);
   const { data, error } = await query;
   if (error) return respond(res, error);
@@ -19,7 +19,7 @@ router.get('/orders', async (req, res) => {
 });
 
 router.get('/orders/:id', async (req, res) => {
-  const { data, error } = await supabase.from('orders').select('*, order_items(*), payments(*), refunds(*)').eq('id', req.params.id).eq('channel', 'ECOMMERCE').single();
+  const { data, error } = await supabase.from('orders').select('*, order_items(*, products(name)), payments(*), refunds(*)').eq('id', req.params.id).eq('channel', 'ECOMMERCE').single();
   if (error) return res.status(404).json({ error: 'E-commerce order not found.' });
   res.json(data);
 });
