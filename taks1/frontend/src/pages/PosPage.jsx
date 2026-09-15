@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { approveEcomRefund, createPosOrder, declineEcomRefund, fetchEcomOrders, fetchPosOrders, fetchProducts, processPosPayment, reservePosStock } from '../services/api';
+import { addPosDraftItem, approveEcomRefund, createPosDraft, declineEcomRefund, fetchEcomOrders, fetchPosOrders, fetchProducts, processPosPayment, removePosDraftItem } from '../services/api';
 import {
   ShoppingCart,
   Plus,
@@ -30,6 +30,8 @@ export default function PosPage() {
   const [posOrders, setPosOrders] = useState([]);
   const [onlineOrders, setOnlineOrders] = useState([]);
   const [showOnline, setShowOnline] = useState(false);
+  const [selectedOnlineOrder, setSelectedOnlineOrder] = useState(null);
+  const [draftOrderId, setDraftOrderId] = useState(null);
 
   useEffect(() => {
     loadProducts();
@@ -56,38 +58,23 @@ export default function PosPage() {
     } catch { setErrorMsg('Could not load the sales dashboard.'); }
   }
 
-  const addToCart = (product) => {
+  const addToCart = async (product) => {
     setErrorMsg('');
-    const existingIndex = cart.findIndex((item) => item.product_id === product.id);
-
-    if (existingIndex > -1) {
-      const existingItem = cart[existingIndex];
-      if (existingItem.quantity >= product.stock) {
-        setErrorMsg(`Cannot add more than available stock (${product.stock}).`);
-        return;
-      }
-      const updatedCart = [...cart];
-      updatedCart[existingIndex].quantity += 1;
-      setCart(updatedCart);
-    } else {
-      if (product.stock < 1) {
-        setErrorMsg('Item is out of stock.');
-        return;
-      }
-      setCart([
-        ...cart,
-        {
-          product_id: product.id,
-          name: product.name,
-          unit_price: product.price,
-          quantity: 1,
-          stock: product.stock
-        }
-      ]);
-    }
+    try {
+      const orderId = draftOrderId || (await createPosDraft('cashier_terminal_01')).order.id;
+      await addPosDraftItem(orderId, product.id);
+      if (!draftOrderId) setDraftOrderId(orderId);
+      setCart((current) => {
+        const existing = current.find((item) => item.product_id === product.id);
+        return existing ? current.map((item) => item.product_id === product.id ? { ...item, quantity: item.quantity + 1 } : item) : [...current, { product_id: product.id, name: product.name, unit_price: product.price, quantity: 1, stock: product.stock }];
+      });
+      await loadProducts();
+    } catch (error) { setErrorMsg(error.response?.data?.error || 'Unable to reserve this item.'); }
   };
 
-  const updateQuantity = (productId, delta) => {
+  const updateQuantity = async (productId, delta) => {
+    if (delta > 0) return addToCart(products.find((product) => product.id === productId));
+    try { await removePosDraftItem(draftOrderId, productId); } catch (error) { setErrorMsg(error.response?.data?.error || 'Unable to release this item.'); return; }
     setCart(
       cart
         .map((item) => {
@@ -103,14 +90,24 @@ export default function PosPage() {
         })
         .filter(Boolean)
     );
+    await loadProducts();
   };
 
-  const removeFromCart = (productId) => {
-    setCart(cart.filter((item) => item.product_id !== productId));
+  const removeFromCart = async (productId) => {
+    const item = cart.find((entry) => entry.product_id === productId);
+    try {
+      for (let count = 0; count < item.quantity; count += 1) {
+        await removePosDraftItem(draftOrderId, productId);
+      }
+      setCart((current) => current.filter((entry) => entry.product_id !== productId));
+      await loadProducts();
+    } catch (error) {
+      setErrorMsg(error.response?.data?.error || 'Unable to release this item.');
+    }
   };
 
-  const clearCart = () => {
-    setCart([]);
+  const clearCart = async () => {
+    for (const item of cart) await removeFromCart(item.product_id);
     setErrorMsg('');
   };
 
@@ -123,22 +120,8 @@ export default function PosPage() {
     setLastTx(null);
 
     try {
-      // 1. Prepare Payload & Create POS Order
-      const itemsPayload = cart.map((item) => ({
-        product_id: item.product_id,
-        quantity: item.quantity,
-        unit_price: item.unit_price
-      }));
-
-      const orderRes = await createPosOrder('cashier_terminal_01', itemsPayload);
-      const order = orderRes.order;
-
-      // 2. Reserve Stock (Default 5-minute lock)
-      for (const item of cart) {
-        await reservePosStock(order.id, item.product_id, item.quantity, 5);
-      }
-
-      // 3. Process POS Payment with unique Idempotency Key
+      const order = { id: draftOrderId, total_amount: subtotal };
+      // Draft stock was reserved as items were selected; this converts it to a sale.
       const idempotencyKey = `pos_tx_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const paymentRes = await processPosPayment(order.id, order.total_amount, idempotencyKey);
 
@@ -151,7 +134,8 @@ export default function PosPage() {
         itemCount: cart.reduce((sum, i) => sum + i.quantity, 0)
       });
 
-      clearCart();
+      setCart([]);
+      setDraftOrderId(null);
       await loadProducts();
       await loadAdminData();
     } catch (err) {
@@ -363,7 +347,7 @@ export default function PosPage() {
           </div>
         </div>
       </div>
-      {showOnline && <div className="fixed inset-0 z-50 bg-slate-950/40 p-4 sm:p-8"><section className="mx-auto max-w-4xl rounded-2xl bg-white p-6 shadow-2xl"><div className="flex items-start justify-between"><div><h2 className="text-xl font-black">Online order tracker</h2><p className="text-sm text-slate-500">Review customer orders and simulate refund decisions.</p></div><button onClick={() => setShowOnline(false)}><X className="text-slate-400"/></button></div>{refundRequests.length > 0 && <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4"><p className="mb-3 text-sm font-black text-amber-900">Refund requests awaiting your decision</p>{refundRequests.map((refund) => <div key={refund.id} className="flex flex-wrap items-center justify-between gap-3 border-t border-amber-200 py-3 first:border-0"><div><p className="font-bold text-slate-800">Order #{refund.order.id.slice(0, 8)} · ${Number(refund.amount).toFixed(2)}</p><p className="text-xs text-slate-500">Customer: {refund.order.user_id}</p></div><div className="flex gap-2"><button disabled={loading} onClick={() => decideRefund(refund, true)} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white"><Check className="h-3 w-3"/>Accept refund</button><button disabled={loading} onClick={() => decideRefund(refund, false)} className="inline-flex items-center gap-1 rounded-lg bg-white px-3 py-2 text-xs font-bold text-rose-600 ring-1 ring-rose-200"><Ban className="h-3 w-3"/>Decline</button></div></div>)}</div>}<div className="mt-5 max-h-[45vh] overflow-auto rounded-xl border border-slate-100">{onlineOrders.map((order) => <div key={order.id} className="flex items-center justify-between border-b border-slate-100 p-4 last:border-0"><div><p className="font-bold text-slate-800">Order #{order.id.slice(0, 8)}</p><p className="text-xs text-slate-500">{order.user_id} · {new Date(order.created_at).toLocaleString()}</p></div><div className="text-right"><p className="font-black">${Number(order.total_amount).toFixed(2)}</p><p className="text-xs font-bold text-cyan-700">{order.status}</p></div></div>)}{!onlineOrders.length && <p className="p-10 text-center text-sm text-slate-400">No online orders yet.</p>}</div></section></div>}
+      {showOnline && <div className="fixed inset-0 z-50 bg-slate-950/40 p-4 sm:p-8"><section className="mx-auto max-w-4xl rounded-2xl bg-white p-6 shadow-2xl"><div className="flex items-start justify-between"><div><h2 className="text-xl font-black">Online order tracker</h2><p className="text-sm text-slate-500">Review customer orders and simulate refund decisions.</p></div><button onClick={() => setShowOnline(false)}><X className="text-slate-400"/></button></div>{refundRequests.length > 0 && <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4"><p className="mb-3 text-sm font-black text-amber-900">Refund requests awaiting your decision</p>{refundRequests.map((refund) => <div key={refund.id} className="flex flex-wrap items-center justify-between gap-3 border-t border-amber-200 py-3 first:border-0"><div><p className="font-bold text-slate-800">Order #{refund.order.id.slice(0, 8)} · ${Number(refund.amount).toFixed(2)}</p><p className="text-xs text-slate-500">Customer: {refund.order.user_id}</p></div><div className="flex gap-2"><button disabled={loading} onClick={() => decideRefund(refund, true)} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white"><Check className="h-3 w-3"/>Accept refund</button><button disabled={loading} onClick={() => decideRefund(refund, false)} className="inline-flex items-center gap-1 rounded-lg bg-white px-3 py-2 text-xs font-bold text-rose-600 ring-1 ring-rose-200"><Ban className="h-3 w-3"/>Decline</button></div></div>)}</div>}<div className="mt-5 max-h-[45vh] overflow-auto rounded-xl border border-slate-100">{onlineOrders.map((order) => <button onClick={() => setSelectedOnlineOrder(order)} key={order.id} className="flex w-full items-center justify-between border-b border-slate-100 p-4 text-left last:border-0 hover:bg-cyan-50"><div><p className="font-bold text-slate-800">Order #{order.id.slice(0, 8)}</p><p className="text-xs text-slate-500">{order.user_id} · {new Date(order.created_at).toLocaleString()}</p></div><div className="text-right"><p className="font-black">${Number(order.total_amount).toFixed(2)}</p><p className="text-xs font-bold text-cyan-700">{order.status}</p></div></button>)}{!onlineOrders.length && <p className="p-10 text-center text-sm text-slate-400">No online orders yet.</p>}</div></section></div>}{selectedOnlineOrder && <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-950/50 p-4"><div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl"><button onClick={() => setSelectedOnlineOrder(null)} className="float-right"><X className="text-slate-400"/></button><p className="text-xs font-bold uppercase text-cyan-700">Online order details</p><h2 className="mt-1 text-2xl font-black">#{selectedOnlineOrder.id.slice(0, 8)}</h2><p className="text-sm text-slate-500">Customer: {selectedOnlineOrder.user_id}</p><div className="mt-5 space-y-2 border-y border-slate-100 py-4">{selectedOnlineOrder.order_items?.map((item) => <div key={item.id} className="flex justify-between text-sm"><span>{item.quantity} × {item.product_id.slice(0, 8)}</span><span className="font-bold">${(Number(item.quantity) * Number(item.unit_price)).toFixed(2)}</span></div>)}</div><div className="mt-4 flex justify-between font-black"><span>Total</span><span>${Number(selectedOnlineOrder.total_amount).toFixed(2)}</span></div><p className="mt-4 rounded-lg bg-slate-50 p-3 text-sm">Payment: {selectedOnlineOrder.payments?.[0]?.status || 'Not recorded'} · Refund: {selectedOnlineOrder.refunds?.[0]?.status || 'None'}</p></div></div>}
     </div>
   );
 }
