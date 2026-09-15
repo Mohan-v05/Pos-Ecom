@@ -10,6 +10,9 @@ const api = axios.create({
 // Products
 export const fetchProducts = async (params = {}) => (await api.get('/products', { params })).data;
 export const fetchProductById = async (id) => (await api.get(`/products/${id}`)).data;
+export const createProduct = async (product) => (await api.post('/products', product)).data;
+export const updateProduct = async (id, product) => (await api.put(`/products/${id}`, product)).data;
+export const deleteProduct = async (id) => (await api.delete(`/products/${id}`)).data;
 
 // POS Channel (Task 01)
 export const createPosOrder = async (userId, items) => (await api.post('/task01/orders', { user_id: userId, items })).data;
@@ -21,10 +24,12 @@ export const processPosPayment = async (orderId, amount, idempotencyKey) =>
 
 // E-Commerce Channel (Task 02)
 export const createEcomOrder = async (userId, items) => (await api.post('/task02/orders', { user_id: userId, items })).data;
-export const fetchEcomOrders = async () => (await api.get('/task02/orders')).data;
+export const fetchEcomOrders = async (userId) => (await api.get('/task02/orders', { params: userId ? { user_id: userId } : {} })).data;
 export const processEcomPayment = async (orderId, amount, idempotencyKey) => 
   (await api.post('/task02/payments', { order_id: orderId, amount, idempotency_key: idempotencyKey })).data;
-export const processEcomRefund = async (orderId, paymentId, amount) => 
-  (await api.post('/task02/refunds', { order_id: orderId, payment_id: paymentId, amount })).data;
+export const requestEcomRefund = async (orderId, paymentId, amount) => 
+  (await api.post('/task02/refunds/request', { order_id: orderId, payment_id: paymentId, amount })).data;
+export const approveEcomRefund = async (refundId) => (await api.post(`/task02/refunds/${refundId}/approve`)).data;
+export const declineEcomRefund = async (refundId) => (await api.delete(`/task02/refunds/${refundId}`)).data;
 
 export default api;
