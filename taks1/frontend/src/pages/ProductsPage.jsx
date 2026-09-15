@@ -19,17 +19,20 @@ const blank = {
 export default function ProductsPage() {
   const [products, setProducts] = useState([]);
   const [search, setSearch] = useState("");
+  const [showAll, setShowAll] = useState(false);
   const [form, setForm] = useState(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  // Admins can see inactive products; customer and POS catalogs cannot.
+  const categoryOptions = [...new Set(products.map((product) => product.category).filter(Boolean))].sort();
+  // The default admin view mirrors sales channels by showing active products.
+  // Admins can explicitly include deactivated products for audit or restoration.
   const load = async () =>
-    setProducts(await fetchProducts({ search, includeInactive: "true" }));
+    setProducts(await fetchProducts({ search, includeInactive: String(showAll) }));
 
   // Load the inventory table once when the page opens.
   useEffect(() => {
     let active = true;
-    fetchProducts({ includeInactive: "true" })
+    fetchProducts({ includeInactive: "false" })
       .then((data) => {
         if (active) setProducts(data);
       })
@@ -128,6 +131,21 @@ export default function ProductsPage() {
         >
           Search
         </button>
+        <select
+          value={showAll ? "all" : "active"}
+          onChange={(event) => {
+            const includeInactive = event.target.value === "all";
+            setShowAll(includeInactive);
+            fetchProducts({ search, includeInactive: String(includeInactive) })
+              .then(setProducts)
+              .catch(() => setMessage("Could not load inventory."));
+          }}
+          className="rounded-xl bg-slate-100 px-3 text-sm font-bold text-slate-700"
+          aria-label="Product visibility"
+        >
+          <option value="active">Active products</option>
+          <option value="all">All products</option>
+        </select>
       </div>
       {/* Shared catalog inventory table */}
       <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
@@ -145,7 +163,14 @@ export default function ProductsPage() {
             {products.map((product) => (
               <tr key={product.id} className="border-t border-slate-100">
                 <td className="p-4">
-                  <p className="font-bold text-slate-800">{product.name}</p>
+                  <p className="font-bold text-slate-800">
+                    {product.name}
+                    {product.is_active === false && (
+                      <span className="ml-2 rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                        Inactive
+                      </span>
+                    )}
+                  </p>
                   <p className="max-w-sm truncate text-xs text-slate-500">
                     {product.description}
                   </p>
@@ -229,18 +254,22 @@ export default function ProductsPage() {
                 />
               </label>
               <label className="text-sm font-bold">
-                Category
-                <select
+                Category <span className="font-normal text-slate-400">(select or type a new category)</span>
+                <input
+                  required
+                  list="product-categories"
                   value={form.category}
                   onChange={(e) =>
                     setForm({ ...form, category: e.target.value })
                   }
                   className="mt-1 w-full rounded-xl border border-slate-200 p-3 font-normal"
-                >
-                  <option>Peripherals</option>
-                  <option>Displays</option>
-                  <option>Accessories</option>
-                </select>
+                  placeholder="e.g. Audio"
+                />
+                <datalist id="product-categories">
+                  {categoryOptions.map((category) => (
+                    <option key={category} value={category} />
+                  ))}
+                </datalist>
               </label>
               <label className="text-sm font-bold">
                 Price
