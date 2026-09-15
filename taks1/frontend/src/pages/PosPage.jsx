@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { fetchProducts, createPosOrder, reservePosStock, processPosPayment } from '../services/api';
+import { approveEcomRefund, createPosOrder, declineEcomRefund, fetchEcomOrders, fetchPosOrders, fetchProducts, processPosPayment, reservePosStock } from '../services/api';
 import {
   ShoppingCart,
   Plus,
@@ -11,7 +11,12 @@ import {
   Search,
   RefreshCw,
   Clock,
-  Package
+  Package,
+  BarChart3,
+  ClipboardList,
+  X,
+  Check,
+  Ban
 } from 'lucide-react';
 
 export default function PosPage() {
@@ -22,9 +27,13 @@ export default function PosPage() {
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [lastTx, setLastTx] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
+  const [posOrders, setPosOrders] = useState([]);
+  const [onlineOrders, setOnlineOrders] = useState([]);
+  const [showOnline, setShowOnline] = useState(false);
 
   useEffect(() => {
     loadProducts();
+    loadAdminData();
   }, []);
 
   async function loadProducts() {
@@ -37,6 +46,14 @@ export default function PosPage() {
     } finally {
       setCatalogLoading(false);
     }
+  }
+
+  async function loadAdminData() {
+    try {
+      const [pos, online] = await Promise.all([fetchPosOrders(), fetchEcomOrders()]);
+      setPosOrders(pos);
+      setOnlineOrders(online);
+    } catch { setErrorMsg('Could not load the sales dashboard.'); }
   }
 
   const addToCart = (product) => {
@@ -136,6 +153,7 @@ export default function PosPage() {
 
       clearCart();
       await loadProducts();
+      await loadAdminData();
     } catch (err) {
       console.error('POS Checkout Error:', err);
       setErrorMsg(err.response?.data?.error || 'Transaction failed. Please try again.');
@@ -148,13 +166,23 @@ export default function PosPage() {
     p.name.toLowerCase().includes(search.toLowerCase()) ||
     p.category.toLowerCase().includes(search.toLowerCase())
   );
+  const today = new Date().toDateString();
+  const paidToday = [...posOrders, ...onlineOrders].filter((order) => order.status === 'PAID' && new Date(order.created_at).toDateString() === today);
+  const todaySales = paidToday.reduce((sum, order) => sum + Number(order.total_amount), 0);
+  const refundRequests = onlineOrders.flatMap((order) => (order.refunds || []).filter((refund) => refund.status === 'PENDING').map((refund) => ({ ...refund, order })));
+  const decideRefund = async (refund, approve) => {
+    setLoading(true);
+    try { if (approve) await approveEcomRefund(refund.id); else await declineEcomRefund(refund.id); await loadProducts(); await loadAdminData(); }
+    catch (error) { setErrorMsg(error.response?.data?.error || 'Could not process refund request.'); }
+    finally { setLoading(false); }
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6">
       {/* Title */}
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900 tracking-tight">POS Register Terminal</h1>
-        <p className="text-xs text-gray-500">Channel: POS | Quick cashier lookup and instant checkout</p>
+      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div><p className="text-xs font-bold uppercase tracking-[.2em] text-cyan-700">Shop admin</p><h1 className="text-3xl font-black text-slate-950 tracking-tight">POS Register</h1><p className="text-xs text-gray-500">In-store checkout and sales operations</p></div>
+        <div className="flex gap-3"><div className="rounded-xl bg-slate-950 px-4 py-2 text-white"><span className="text-[10px] uppercase tracking-wider text-slate-400">Today’s sales</span><p className="flex items-center gap-1 text-lg font-black"><BarChart3 className="h-4 w-4 text-cyan-300"/>${todaySales.toFixed(2)}</p></div><button onClick={() => setShowOnline(true)} className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-700"><ClipboardList className="mr-2 inline h-4 w-4 text-cyan-600"/>Online orders {refundRequests.length ? `(${refundRequests.length})` : ''}</button></div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -335,6 +363,7 @@ export default function PosPage() {
           </div>
         </div>
       </div>
+      {showOnline && <div className="fixed inset-0 z-50 bg-slate-950/40 p-4 sm:p-8"><section className="mx-auto max-w-4xl rounded-2xl bg-white p-6 shadow-2xl"><div className="flex items-start justify-between"><div><h2 className="text-xl font-black">Online order tracker</h2><p className="text-sm text-slate-500">Review customer orders and simulate refund decisions.</p></div><button onClick={() => setShowOnline(false)}><X className="text-slate-400"/></button></div>{refundRequests.length > 0 && <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4"><p className="mb-3 text-sm font-black text-amber-900">Refund requests awaiting your decision</p>{refundRequests.map((refund) => <div key={refund.id} className="flex flex-wrap items-center justify-between gap-3 border-t border-amber-200 py-3 first:border-0"><div><p className="font-bold text-slate-800">Order #{refund.order.id.slice(0, 8)} · ${Number(refund.amount).toFixed(2)}</p><p className="text-xs text-slate-500">Customer: {refund.order.user_id}</p></div><div className="flex gap-2"><button disabled={loading} onClick={() => decideRefund(refund, true)} className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white"><Check className="h-3 w-3"/>Accept refund</button><button disabled={loading} onClick={() => decideRefund(refund, false)} className="inline-flex items-center gap-1 rounded-lg bg-white px-3 py-2 text-xs font-bold text-rose-600 ring-1 ring-rose-200"><Ban className="h-3 w-3"/>Decline</button></div></div>)}</div>}<div className="mt-5 max-h-[45vh] overflow-auto rounded-xl border border-slate-100">{onlineOrders.map((order) => <div key={order.id} className="flex items-center justify-between border-b border-slate-100 p-4 last:border-0"><div><p className="font-bold text-slate-800">Order #{order.id.slice(0, 8)}</p><p className="text-xs text-slate-500">{order.user_id} · {new Date(order.created_at).toLocaleString()}</p></div><div className="text-right"><p className="font-black">${Number(order.total_amount).toFixed(2)}</p><p className="text-xs font-bold text-cyan-700">{order.status}</p></div></div>)}{!onlineOrders.length && <p className="p-10 text-center text-sm text-slate-400">No online orders yet.</p>}</div></section></div>}
     </div>
   );
 }
