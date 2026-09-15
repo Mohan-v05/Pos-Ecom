@@ -29,10 +29,16 @@ router.post('/', async (req, res) => {
 
 // READ ALL: Fetch products with search, category, and price filtering
 router.get('/', async (req, res) => {
-  const { search, category, minPrice, maxPrice } = req.query;
+  const { search, category, minPrice, maxPrice, includeInactive } = req.query;
   await releaseExpiredReservations();
 
   let query = supabase.from('products').select('*');
+
+  // Customer and POS catalogs only show products that are available for sale.
+  // Admin inventory can opt in to inactive products with ?includeInactive=true.
+  if (includeInactive !== 'true') {
+    query = query.eq('is_active', true);
+  }
 
   // Apply query filters sent from React frontend
   if (search) {
@@ -73,10 +79,10 @@ router.get('/:id', async (req, res) => {
 // UPDATE: Modify product by UUID
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, description, price, category, stock } = req.body;
+  const { name, description, price, category, stock, is_active } = req.body;
 
   const updates = { updated_at: new Date().toISOString() };
-  for (const [key, value] of Object.entries({ name, description, price, category, stock })) {
+  for (const [key, value] of Object.entries({ name, description, price, category, stock, is_active })) {
     if (value !== undefined) updates[key] = value;
   }
 
@@ -93,20 +99,20 @@ router.put('/:id', async (req, res) => {
   res.status(200).json(data);
 });
 
-// DELETE: Remove product by UUID
+// DELETE: Soft-delete the product so past order_items keep a valid product reference.
 router.delete('/:id', async (req, res) => {
   const { id } = req.params;
 
   const { data, error } = await supabase
     .from('products')
-    .delete()
+    .update({ is_active: false, updated_at: new Date().toISOString() })
     .eq('id', id)
     .select();
 
   if (error) return res.status(400).json({ error: error.message });
   if (!data || data.length === 0) return res.status(404).json({ error: 'Product not found' });
 
-  res.status(200).json({ message: 'Product deleted successfully' });
+  res.status(200).json({ message: 'Product deactivated successfully' });
 });
 
 module.exports = router;
