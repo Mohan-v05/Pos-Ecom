@@ -1,153 +1,102 @@
-import React, { useState, useEffect } from 'react';
-import { fetchProducts, createEcomOrder, processEcomPayment, fetchEcomOrders, processEcomRefund } from '../services/api';
-import { ShoppingBag, RotateCcw, CheckCircle } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { CheckCircle2, CreditCard, PackageOpen, RefreshCw, RotateCcw, ShoppingBag, Sparkles } from 'lucide-react';
+import { createEcomOrder, fetchEcomOrders, fetchProducts, processEcomPayment, processEcomRefund } from '../services/api';
+
+const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 
 export default function EcomPage() {
   const [products, setProducts] = useState([]);
   const [orders, setOrders] = useState([]);
   const [selectedProductId, setSelectedProductId] = useState('');
   const [quantity, setQuantity] = useState(1);
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState('');
-
-  useEffect(() => {
-    loadData();
-  }, []);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState(null);
 
   const loadData = async () => {
-    const [prodData, orderData] = await Promise.all([fetchProducts(), fetchEcomOrders()]);
-    setProducts(prodData);
-    setOrders(orderData);
-  };
-
-  const handleOnlineCheckout = async (e) => {
-    e.preventDefault();
-    if (!selectedProductId) return;
-    setLoading(true);
-    setMessage('');
-
     try {
-      const product = products.find((p) => p.id === selectedProductId);
-      const items = [{ product_id: product.id, quantity: Number(quantity), unit_price: product.price }];
-      
-      // 1. Create E-Commerce Order
-      const { order } = await createEcomOrder('cust_online_01', items);
-
-      // 2. Process E-Commerce Payment
-      const idempotencyKey = `tx_ecom_${Date.now()}`;
-      await processEcomPayment(order.id, order.total_amount, idempotencyKey);
-
-      setMessage(`Order #${order.id.slice(0, 8)} created & paid!`);
-      loadData();
-    } catch (err) {
-      alert(`Error: ${err.response?.data?.error || err.message}`);
-    } finally {
-      setLoading(false);
+      const [catalog, history] = await Promise.all([fetchProducts(), fetchEcomOrders()]);
+      setProducts(catalog);
+      setOrders(history);
+    } catch (error) {
+      setNotice({ type: 'error', text: error.response?.data?.error || 'Could not load the storefront. Check that the API is running.' });
     }
   };
 
-  const handleRefund = async (order) => {
-    const payment = order.payments?.[0];
-    if (!payment) return alert('No payment record found for this order');
+  useEffect(() => {
+    let active = true;
+    Promise.all([fetchProducts(), fetchEcomOrders()])
+      .then(([catalog, history]) => {
+        if (!active) return;
+        setProducts(catalog);
+        setOrders(history);
+      })
+      .catch((error) => {
+        if (active) setNotice({ type: 'error', text: error.response?.data?.error || 'Could not load the storefront. Check that the API is running.' });
+      });
+    return () => { active = false; };
+  }, []);
 
-    setLoading(true);
+  const selected = useMemo(() => products.find((product) => product.id === selectedProductId), [products, selectedProductId]);
+  const requestedQuantity = Math.max(1, Number(quantity) || 1);
+
+  const checkout = async (event) => {
+    event.preventDefault();
+    if (!selected) return;
+    if (requestedQuantity > selected.stock) return setNotice({ type: 'error', text: `Only ${selected.stock} unit(s) are currently available.` });
+    setBusy(true);
+    setNotice(null);
+    try {
+      const { order } = await createEcomOrder('cust_online_01', [{ product_id: selected.id, quantity: requestedQuantity }]);
+      await processEcomPayment(order.id, order.total_amount, `ecom_${crypto.randomUUID()}`);
+      setNotice({ type: 'success', text: `Order #${order.id.slice(0, 8)} is paid and on its way.` });
+      setSelectedProductId('');
+      setQuantity(1);
+      await loadData();
+    } catch (error) {
+      setNotice({ type: 'error', text: error.response?.data?.error || 'Checkout could not be completed.' });
+    } finally { setBusy(false); }
+  };
+
+  const refund = async (order) => {
+    const payment = order.payments?.find((entry) => entry.status === 'SUCCESS');
+    if (!payment) return setNotice({ type: 'error', text: 'A successful payment was not found for that order.' });
+    setBusy(true);
+    setNotice(null);
     try {
       await processEcomRefund(order.id, payment.id, order.total_amount);
-      setMessage(`Refund processed for Order #${order.id.slice(0, 8)}`);
-      loadData();
-    } catch (err) {
-      alert(`Refund error: ${err.response?.data?.error || err.message}`);
-    } finally {
-      setLoading(false);
-    }
+      setNotice({ type: 'success', text: `Refund for order #${order.id.slice(0, 8)} has been completed.` });
+      await loadData();
+    } catch (error) {
+      setNotice({ type: 'error', text: error.response?.data?.error || 'Refund could not be completed.' });
+    } finally { setBusy(false); }
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-2 gap-8">
-      {/* Online Purchase Form */}
-      <div className="bg-white border rounded-xl p-6 shadow-sm">
-        <h2 className="text-xl font-bold mb-4 flex items-center gap-2 text-gray-800">
-          <ShoppingBag className="w-5 h-5 text-blue-600" /> E-Commerce Checkout
-        </h2>
-        <form onSubmit={handleOnlineCheckout} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1">Select Product</label>
-            <select
-              value={selectedProductId}
-              onChange={(e) => setSelectedProductId(e.target.value)}
-              className="w-full border rounded-lg p-2.5"
-              required
-            >
-              <option value="">-- Choose Item --</option>
-              {products.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} (${p.price}) - Stock: {p.stock}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium mb-1">Quantity</label>
-            <input
-              type="number"
-              min="1"
-              value={quantity}
-              onChange={(e) => setQuantity(e.target.value)}
-              className="w-full border rounded-lg p-2.5"
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-blue-600 text-white font-bold py-3 rounded-lg hover:bg-blue-700 disabled:bg-gray-300"
-          >
-            {loading ? 'Processing...' : 'Place E-Commerce Order'}
-          </button>
-        </form>
-        {message && (
-          <div className="mt-4 p-3 bg-green-50 text-green-700 rounded-lg text-sm flex items-center gap-2">
-            <CheckCircle className="w-4 h-4" /> {message}
-          </div>
-        )}
-      </div>
-
-      {/* Order History & Refunds */}
-      <div className="bg-white border rounded-xl p-6 shadow-sm">
-        <h2 className="text-xl font-bold mb-4 flex items-center gap-2 text-gray-800">
-          <RotateCcw className="w-5 h-5 text-purple-600" /> Online Orders & Refunds
-        </h2>
-        <div className="space-y-4 max-h-[500px] overflow-y-auto">
-          {orders.length === 0 ? (
-            <p className="text-gray-400">No online orders found.</p>
-          ) : (
-            orders.map((o) => (
-              <div key={o.id} className="border p-4 rounded-lg flex justify-between items-center">
-                <div>
-                  <div className="font-semibold">Order #{o.id.slice(0, 8)}</div>
-                  <div className="text-xs text-gray-500">User: {o.user_id}</div>
-                  <div className="text-sm font-bold text-gray-800 mt-1">${o.total_amount}</div>
-                </div>
-                <div className="text-right">
-                  <span className={`inline-block px-2.5 py-1 text-xs font-bold rounded-full mb-2 ${
-                    o.status === 'PAID' ? 'bg-green-100 text-green-700' :
-                    o.status === 'REFUNDED' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-700'
-                  }`}>
-                    {o.status}
-                  </span>
-                  {o.status === 'PAID' && (
-                    <button
-                      onClick={() => handleRefund(o)}
-                      className="block text-xs bg-red-50 text-red-600 border border-red-200 px-3 py-1 rounded hover:bg-red-100"
-                    >
-                      Issue Refund
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))
-          )}
+    <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:py-12">
+      <section className="relative mb-8 overflow-hidden rounded-3xl bg-slate-950 px-6 py-8 text-white shadow-2xl shadow-slate-900/15 sm:px-10">
+        <div className="absolute -right-16 -top-20 h-56 w-56 rounded-full bg-cyan-400/20 blur-3xl" />
+        <div className="absolute bottom-0 right-28 h-32 w-32 rounded-full bg-indigo-500/30 blur-2xl" />
+        <div className="relative flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+          <div><p className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-[0.22em] text-cyan-300"><Sparkles className="h-4 w-4" /> Direct storefront</p><h1 className="text-3xl font-black tracking-tight sm:text-4xl">One inventory. Every channel.</h1><p className="mt-3 max-w-xl text-sm leading-6 text-slate-300">Buy from the online store with the same live catalog your POS team uses.</p></div>
+          <div className="rounded-2xl border border-white/10 bg-white/10 px-5 py-3 backdrop-blur"><p className="text-xs text-slate-300">Live catalog</p><p className="text-xl font-bold">{products.length} products available</p></div>
         </div>
+      </section>
+
+      {notice && <div className={`mb-6 flex items-start gap-3 rounded-2xl border px-4 py-3 text-sm ${notice.type === 'success' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-rose-200 bg-rose-50 text-rose-800'}`}><CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />{notice.text}</div>}
+
+      <div className="grid gap-7 lg:grid-cols-[1.05fr_.95fr]">
+        <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/50 sm:p-8">
+          <div className="mb-7 flex items-center gap-3"><span className="grid h-11 w-11 place-items-center rounded-2xl bg-cyan-50 text-cyan-700"><ShoppingBag className="h-5 w-5" /></span><div><h2 className="font-bold text-slate-900">Build your order</h2><p className="text-sm text-slate-500">Secure checkout with real-time availability.</p></div></div>
+          <form onSubmit={checkout} className="space-y-5">
+            <label className="block text-sm font-semibold text-slate-700">Choose a product<select value={selectedProductId} onChange={(event) => setSelectedProductId(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-500/10" required><option value="">Select from the catalog</option>{products.map((product) => <option disabled={product.stock < 1} key={product.id} value={product.id}>{product.name} — {money.format(product.price)} · {product.stock} left</option>)}</select></label>
+            <div className="grid gap-4 sm:grid-cols-2"><label className="block text-sm font-semibold text-slate-700">Quantity<input type="number" min="1" max={selected?.stock || 1} value={quantity} onChange={(event) => setQuantity(event.target.value)} className="mt-2 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-500/10" /></label><div className="rounded-xl bg-slate-50 px-4 py-3"><p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Order total</p><p className="mt-1 text-xl font-black text-slate-900">{selected ? money.format(selected.price * requestedQuantity) : '—'}</p></div></div>
+            {selected && <div className="flex items-center justify-between rounded-xl border border-cyan-100 bg-cyan-50/60 px-4 py-3 text-sm"><span className="font-medium text-slate-700">{selected.name}</span><span className="font-bold text-cyan-800">{selected.stock} in stock</span></div>}
+            <button disabled={busy || !selected || selected.stock < 1} className="flex w-full items-center justify-center gap-2 rounded-xl bg-slate-950 py-3.5 font-bold text-white shadow-lg shadow-slate-900/20 transition hover:bg-cyan-700 disabled:cursor-not-allowed disabled:bg-slate-300">{busy ? <RefreshCw className="h-4 w-4 animate-spin" /> : <CreditCard className="h-4 w-4" />}{busy ? 'Processing securely…' : 'Pay & place order'}</button>
+          </form>
+        </section>
+
+        <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-xl shadow-slate-200/50 sm:p-8"><div className="mb-6 flex items-center justify-between"><div><h2 className="font-bold text-slate-900">Order activity</h2><p className="text-sm text-slate-500">Manage online payments and refunds.</p></div><button onClick={loadData} aria-label="Refresh order history" className="rounded-xl border border-slate-200 p-2 text-slate-500 transition hover:bg-slate-50"><RefreshCw className="h-4 w-4" /></button></div><div className="max-h-[430px] space-y-3 overflow-y-auto pr-1">{orders.length === 0 ? <div className="grid place-items-center py-16 text-center text-slate-500"><PackageOpen className="mb-3 h-10 w-10 text-slate-300" /><p className="font-medium">No online orders yet</p><p className="mt-1 text-sm">Your completed purchases will appear here.</p></div> : orders.map((order) => <article key={order.id} className="rounded-2xl border border-slate-100 p-4 transition hover:border-slate-200 hover:shadow-sm"><div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-800">Order #{order.id.slice(0, 8)}</p><p className="mt-1 text-xs text-slate-500">{new Date(order.created_at).toLocaleString()}</p></div><span className={`rounded-full px-2.5 py-1 text-xs font-bold ${order.status === 'PAID' ? 'bg-emerald-100 text-emerald-700' : order.status === 'REFUNDED' ? 'bg-violet-100 text-violet-700' : 'bg-amber-100 text-amber-700'}`}>{order.status}</span></div><div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3"><span className="font-bold text-slate-900">{money.format(order.total_amount)}</span>{order.status === 'PAID' && <button disabled={busy} onClick={() => refund(order)} className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-bold text-rose-600 transition hover:bg-rose-50 disabled:opacity-50"><RotateCcw className="h-3.5 w-3.5" />Refund order</button>}</div></article>)}</div></section>
       </div>
-    </div>
+    </main>
   );
 }

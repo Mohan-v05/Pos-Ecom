@@ -1,10 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../supabaseClient');
+const { releaseExpiredReservations } = require('../services/orderService');
 
 // CREATE: Add a new product
 router.post('/', async (req, res) => {
-  const { name, description, price, category, stock, reserved_stock } = req.body;
+  const { name, description, price, category, stock } = req.body;
 
   if (!name || price === undefined || !category) {
     return res.status(400).json({ error: 'Name, price, and category are required fields.' });
@@ -17,8 +18,7 @@ router.post('/', async (req, res) => {
       description,
       price,
       category,
-      stock: stock ?? 0,
-      reserved_stock: reserved_stock ?? 0
+      stock: stock ?? 0
     }])
     .select()
     .single();
@@ -30,6 +30,7 @@ router.post('/', async (req, res) => {
 // READ ALL: Fetch products with search, category, and price filtering
 router.get('/', async (req, res) => {
   const { search, category, minPrice, maxPrice } = req.query;
+  await releaseExpiredReservations();
 
   let query = supabase.from('products').select('*');
 
@@ -72,19 +73,16 @@ router.get('/:id', async (req, res) => {
 // UPDATE: Modify product by UUID
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, description, price, category, stock, reserved_stock } = req.body;
+  const { name, description, price, category, stock } = req.body;
+
+  const updates = { updated_at: new Date().toISOString() };
+  for (const [key, value] of Object.entries({ name, description, price, category, stock })) {
+    if (value !== undefined) updates[key] = value;
+  }
 
   const { data, error } = await supabase
     .from('products')
-    .update({
-      name,
-      description,
-      price,
-      category,
-      stock,
-      reserved_stock,
-      updated_at: new Date().toISOString()
-    })
+    .update(updates)
     .eq('id', id)
     .select()
     .single();

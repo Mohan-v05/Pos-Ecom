@@ -1,124 +1,70 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../supabaseClient');
+const { createOrder, fail, getChannelOrder } = require('../services/orderService');
 
-// ==========================================
-// ORDERS & ORDER ITEMS (ECOMMERCE CHANNEL)
-// ==========================================
+const respond = (res, error) => res.status(error.status || 500).json({ error: error.message || 'Unexpected server error.' });
 
-// CREATE: Create a new E-Commerce order with items
 router.post('/orders', async (req, res) => {
-  const { user_id, items } = req.body;
-
-  if (!user_id || !items || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: 'user_id and a non-empty items array are required.' });
-  }
-
-  const total_amount = items.reduce((sum, item) => sum + (item.unit_price * item.quantity), 0);
-
-  // 1. Insert order with channel discriminator set to 'ECOMMERCE'
-  const { data: order, error: orderError } = await supabase
-    .from('orders')
-    .insert([{ user_id, channel: 'ECOMMERCE', total_amount, status: 'PENDING' }])
-    .select()
-    .single();
-
-  if (orderError) return res.status(400).json({ error: orderError.message });
-
-  // 2. Insert order items linked to order ID
-  const orderItemsPayload = items.map(item => ({
-    order_id: order.id,
-    product_id: item.product_id,
-    quantity: item.quantity,
-    unit_price: item.unit_price
-  }));
-
-  const { data: orderItems, error: itemsError } = await supabase
-    .from('order_items')
-    .insert(orderItemsPayload)
-    .select();
-
-  if (itemsError) return res.status(400).json({ error: itemsError.message });
-
-  res.status(201).json({ order, items: orderItems });
+  try { res.status(201).json(await createOrder({ userId: req.body.user_id, channel: 'ECOMMERCE', items: req.body.items })); }
+  catch (error) { respond(res, error); }
 });
 
-// READ ALL: Get all E-Commerce orders with items
-router.get('/orders', async (req, res) => {
-  const { data, error } = await supabase
-    .from('orders')
-    .select('*, order_items(*)')
-    .eq('channel', 'ECOMMERCE')
-    .order('created_at', { ascending: false });
-
-  if (error) return res.status(400).json({ error: error.message });
-  res.status(200).json(data);
+router.get('/orders', async (_req, res) => {
+  const { data, error } = await supabase.from('orders').select('*, order_items(*), payments(*), refunds(*)').eq('channel', 'ECOMMERCE').order('created_at', { ascending: false });
+  if (error) return respond(res, error);
+  res.json(data);
 });
 
-// READ ONE: Get single E-Commerce order details with payments, reservations & refunds
 router.get('/orders/:id', async (req, res) => {
-  const { id } = req.params;
-  const { data, error } = await supabase
-    .from('orders')
-    .select('*, order_items(*), reservations(*), payments(*), refunds(*)')
-    .eq('id', id)
-    .eq('channel', 'ECOMMERCE')
-    .single();
-
-  if (error) return res.status(404).json({ error: 'E-Commerce order not found' });
-  res.status(200).json(data);
+  const { data, error } = await supabase.from('orders').select('*, order_items(*), payments(*), refunds(*)').eq('id', req.params.id).eq('channel', 'ECOMMERCE').single();
+  if (error) return res.status(404).json({ error: 'E-commerce order not found.' });
+  res.json(data);
 });
 
-// ==========================================
-// PAYMENTS
-// ==========================================
-
-// CREATE: Process E-Commerce payment
 router.post('/payments', async (req, res) => {
-  const { order_id, idempotency_key, amount, status = 'SUCCESS' } = req.body;
-
-  const { data: payment, error: paymentError } = await supabase
-    .from('payments')
-    .insert([{ order_id, idempotency_key, amount, status }])
-    .select()
-    .single();
-
-  if (paymentError) return res.status(400).json({ error: paymentError.message });
-
-  // Update order status if payment is successful
-  if (status === 'SUCCESS') {
-    await supabase
-      .from('orders')
-      .update({ status: 'PAID', updated_at: new Date().toISOString() })
-      .eq('id', order_id);
-  }
-
-  res.status(201).json(payment);
+  try {
+    const { order_id, idempotency_key } = req.body;
+    if (!order_id || !idempotency_key) throw fail('order_id and idempotency_key are required.');
+    const { data: previous } = await supabase.from('payments').select('*').eq('idempotency_key', idempotency_key).maybeSingle();
+    if (previous) return res.json(previous);
+    const order = await getChannelOrder(order_id, 'ECOMMERCE', true);
+    if (order.status !== 'PENDING') throw fail('Only pending orders can be paid.');
+    if (Number(req.body.amount) !== Number(order.total_amount)) throw fail('Payment amount does not match the order total.');
+    const now = new Date().toISOString();
+    for (const item of order.order_items) {
+      const { data: product, error } = await supabase.from('products').select('stock').eq('id', item.product_id).single();
+      if (error || Number(product.stock) < Number(item.quantity)) throw fail('An item is no longer in stock. Refresh the catalog and try again.');
+      const { data: updated } = await supabase.from('products').update({ stock: Number(product.stock) - Number(item.quantity), updated_at: now }).eq('id', item.product_id).eq('stock', product.stock).select('id').maybeSingle();
+      if (!updated) throw fail('Inventory changed while processing payment; please retry.');
+    }
+    const { data: payment, error } = await supabase.from('payments').insert({ order_id, idempotency_key, amount: order.total_amount, status: 'SUCCESS' }).select().single();
+    if (error) throw fail(error.message);
+    await supabase.from('orders').update({ status: 'PAID', updated_at: now }).eq('id', order_id);
+    res.status(201).json(payment);
+  } catch (error) { respond(res, error); }
 });
 
-// ==========================================
-// REFUNDS
-// ==========================================
-
-// CREATE: Initiate a refund for an order
 router.post('/refunds', async (req, res) => {
-  const { order_id, payment_id, amount, status = 'COMPLETED' } = req.body;
-
-  const { data: refund, error: refundError } = await supabase
-    .from('refunds')
-    .insert([{ order_id, payment_id, amount, status }])
-    .select()
-    .single();
-
-  if (refundError) return res.status(400).json({ error: refundError.message });
-
-  // Update order status to REFUNDED
-  await supabase
-    .from('orders')
-    .update({ status: 'REFUNDED', updated_at: new Date().toISOString() })
-    .eq('id', order_id);
-
-  res.status(201).json(refund);
+  try {
+    const { order_id, payment_id } = req.body;
+    const order = await getChannelOrder(order_id, 'ECOMMERCE', true);
+    if (order.status !== 'PAID') throw fail('Only paid orders can be refunded.');
+    if (Number(req.body.amount) !== Number(order.total_amount)) throw fail('A full-order refund must match the order total.');
+    const { data: payment, error: paymentError } = await supabase.from('payments').select('*').eq('id', payment_id).eq('order_id', order_id).eq('status', 'SUCCESS').single();
+    if (paymentError || !payment) throw fail('The successful payment for this order was not found.', 404);
+    const { data: existing } = await supabase.from('refunds').select('id').eq('order_id', order_id).maybeSingle();
+    if (existing) throw fail('This order has already been refunded.');
+    const { data: refund, error } = await supabase.from('refunds').insert({ order_id, payment_id, amount: order.total_amount, status: 'COMPLETED' }).select().single();
+    if (error) throw fail(error.message);
+    const now = new Date().toISOString();
+    for (const item of order.order_items) {
+      const { data: product } = await supabase.from('products').select('stock').eq('id', item.product_id).single();
+      if (product) await supabase.from('products').update({ stock: Number(product.stock) + Number(item.quantity), updated_at: now }).eq('id', item.product_id);
+    }
+    await supabase.from('orders').update({ status: 'REFUNDED', updated_at: now }).eq('id', order_id);
+    res.status(201).json(refund);
+  } catch (error) { respond(res, error); }
 });
 
 module.exports = router;

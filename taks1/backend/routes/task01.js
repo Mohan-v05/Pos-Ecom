@@ -1,136 +1,73 @@
 const express = require('express');
 const router = express.Router();
 const supabase = require('../supabaseClient');
+const { createOrder, fail, getChannelOrder, releaseExpiredReservations } = require('../services/orderService');
 
-// ==========================================
-// ORDERS & ORDER ITEMS (POS CHANNEL)
-// ==========================================
+const respond = (res, error) => res.status(error.status || 500).json({ error: error.message || 'Unexpected server error.' });
 
-// CREATE: Create a new POS order with items
 router.post('/orders', async (req, res) => {
-  const { user_id, items } = req.body; // items: [{ product_id, quantity, unit_price }]
-
-  if (!user_id || !items || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: 'user_id and a non-empty items array are required.' });
-  }
-
-  // Calculate total amount
-  const total_amount = items.reduce((sum, item) => sum + (item.unit_price * item.quantity), 0);
-
-  // 1. Insert order with channel discriminator set to 'POS'
-  const { data: order, error: orderError } = await supabase
-    .from('orders')
-    .insert([{ user_id, channel: 'POS', total_amount, status: 'PENDING' }])
-    .select()
-    .single();
-
-  if (orderError) return res.status(400).json({ error: orderError.message });
-
-  // 2. Insert order items linked to order ID
-  const orderItemsPayload = items.map(item => ({
-    order_id: order.id,
-    product_id: item.product_id,
-    quantity: item.quantity,
-    unit_price: item.unit_price
-  }));
-
-  const { data: orderItems, error: itemsError } = await supabase
-    .from('order_items')
-    .insert(orderItemsPayload)
-    .select();
-
-  if (itemsError) return res.status(400).json({ error: itemsError.message });
-
-  res.status(201).json({ order, items: orderItems });
+  try { res.status(201).json(await createOrder({ userId: req.body.user_id, channel: 'POS', items: req.body.items })); }
+  catch (error) { respond(res, error); }
 });
 
-// READ ALL: Get all POS orders with their order items
-router.get('/orders', async (req, res) => {
-  const { data, error } = await supabase
-    .from('orders')
-    .select('*, order_items(*)')
-    .eq('channel', 'POS')
-    .order('created_at', { ascending: false });
-
-  if (error) return res.status(400).json({ error: error.message });
-  res.status(200).json(data);
+router.get('/orders', async (_req, res) => {
+  const { data, error } = await supabase.from('orders').select('*, order_items(*), payments(*)').eq('channel', 'POS').order('created_at', { ascending: false });
+  if (error) return respond(res, error);
+  res.json(data);
 });
 
-// READ ONE: Get single POS order details with nested relations
 router.get('/orders/:id', async (req, res) => {
-  const { id } = req.params;
-  const { data, error } = await supabase
-    .from('orders')
-    .select('*, order_items(*), reservations(*), payments(*)')
-    .eq('id', id)
-    .eq('channel', 'POS')
-    .single();
-
-  if (error) return res.status(404).json({ error: 'POS Order not found' });
-  res.status(200).json(data);
+  const { data, error } = await supabase.from('orders').select('*, order_items(*), reservations(*), payments(*)').eq('id', req.params.id).eq('channel', 'POS').single();
+  if (error) return res.status(404).json({ error: 'POS order not found.' });
+  res.json(data);
 });
 
-// UPDATE: Update order status
-router.patch('/orders/:id/status', async (req, res) => {
-  const { id } = req.params;
-  const { status } = req.body;
-
-  const { data, error } = await supabase
-    .from('orders')
-    .update({ status, updated_at: new Date().toISOString() })
-    .eq('id', id)
-    .select()
-    .single();
-
-  if (error) return res.status(400).json({ error: orderError?.message || error.message });
-  res.status(200).json(data);
-});
-
-// ==========================================
-// STOCK RESERVATIONS
-// ==========================================
-
-// CREATE: Create stock reservation (Defaults to 5-minute checkout lock)
 router.post('/reservations', async (req, res) => {
-  const { order_id, product_id, quantity, duration_minutes = 5 } = req.body;
-
-  const expires_at = new Date(Date.now() + duration_minutes * 60000).toISOString();
-
-  const { data, error } = await supabase
-    .from('reservations')
-    .insert([{ order_id, product_id, quantity, expires_at, status: 'ACTIVE' }])
-    .select()
-    .single();
-
-  if (error) return res.status(400).json({ error: error.message });
-  res.status(201).json(data);
+  try {
+    await releaseExpiredReservations();
+    const { order_id, product_id } = req.body;
+    const quantity = Number(req.body.quantity);
+    const duration = Number(req.body.duration_minutes ?? 5);
+    if (!order_id || !product_id || !Number.isInteger(quantity) || quantity <= 0 || !Number.isFinite(duration) || duration <= 0 || duration > 30) throw fail('A valid order, product, quantity, and 1–30 minute duration are required.');
+    const order = await getChannelOrder(order_id, 'POS', true);
+    if (!['PENDING', 'RESERVED'].includes(order.status)) throw fail('This order can no longer be reserved.');
+    if (!order.order_items.some((line) => line.product_id === product_id && Number(line.quantity) === quantity)) throw fail('Reservation does not match an order line.');
+    const { data: existing } = await supabase.from('reservations').select('id').eq('order_id', order_id).eq('product_id', product_id).eq('status', 'ACTIVE').maybeSingle();
+    if (existing) throw fail('This item is already reserved for the order.');
+    const { data: product, error: productError } = await supabase.from('products').select('stock').eq('id', product_id).single();
+    if (productError || Number(product.stock) < quantity) throw fail('Insufficient stock to reserve this item.');
+    const now = new Date().toISOString();
+    const { data: debited } = await supabase.from('products').update({ stock: Number(product.stock) - quantity, updated_at: now }).eq('id', product_id).eq('stock', product.stock).select('id').maybeSingle();
+    if (!debited) throw fail('Stock changed while reserving; please retry.');
+    const { data, error } = await supabase.from('reservations').insert({ order_id, product_id, quantity, expires_at: new Date(Date.now() + duration * 60000).toISOString(), status: 'ACTIVE' }).select().single();
+    if (error) {
+      await supabase.from('products').update({ stock: Number(product.stock), updated_at: new Date().toISOString() }).eq('id', product_id);
+      throw fail(error.message);
+    }
+    await supabase.from('orders').update({ status: 'RESERVED', updated_at: now }).eq('id', order_id);
+    res.status(201).json(data);
+  } catch (error) { respond(res, error); }
 });
 
-// ==========================================
-// MOCK PAYMENTS
-// ==========================================
-
-// CREATE: Process POS payment (Enforces uniqueness via Idempotency Key)
 router.post('/payments', async (req, res) => {
-  const { order_id, idempotency_key, amount, status = 'SUCCESS' } = req.body;
-
-  const { data: payment, error: paymentError } = await supabase
-    .from('payments')
-    .insert([{ order_id, idempotency_key, amount, status }])
-    .select()
-    .single();
-
-  if (paymentError) return res.status(400).json({ error: paymentError.message });
-
-  // Update order status if payment is successful
-  if (status === 'SUCCESS') {
-    await supabase
-      .from('orders')
-      .update({ status: 'PAID', updated_at: new Date().toISOString() })
-      .eq('id', order_id);
-  }
-
-  res.status(201).json(payment);
+  try {
+    await releaseExpiredReservations();
+    const { order_id, idempotency_key } = req.body;
+    if (!order_id || !idempotency_key) throw fail('order_id and idempotency_key are required.');
+    const { data: previous } = await supabase.from('payments').select('*').eq('idempotency_key', idempotency_key).maybeSingle();
+    if (previous) return res.json(previous);
+    const order = await getChannelOrder(order_id, 'POS', true);
+    if (order.status !== 'RESERVED') throw fail('A POS order must have active stock reservations before payment.');
+    if (Number(req.body.amount) !== Number(order.total_amount)) throw fail('Payment amount does not match the order total.');
+    const { data: reservations } = await supabase.from('reservations').select('*').eq('order_id', order_id).eq('status', 'ACTIVE').gt('expires_at', new Date().toISOString());
+    if (!reservations || reservations.length !== order.order_items.length) throw fail('All order items must have active reservations.');
+    const { data: payment, error } = await supabase.from('payments').insert({ order_id, idempotency_key, amount: order.total_amount, status: 'SUCCESS' }).select().single();
+    if (error) throw fail(error.message);
+    const now = new Date().toISOString();
+    await supabase.from('reservations').update({ status: 'CONVERTED' }).eq('order_id', order_id).eq('status', 'ACTIVE');
+    await supabase.from('orders').update({ status: 'PAID', updated_at: now }).eq('id', order_id);
+    res.status(201).json(payment);
+  } catch (error) { respond(res, error); }
 });
 
 module.exports = router;

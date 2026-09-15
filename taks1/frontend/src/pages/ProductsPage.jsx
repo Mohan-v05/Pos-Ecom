@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { fetchProducts } from '../services/api';
 import { Search, Filter, RefreshCw, Package, Tag } from 'lucide-react';
 
@@ -12,9 +12,11 @@ export default function ProductsPage() {
 
   useEffect(() => {
     loadProducts();
+  // Filters other than category are applied explicitly with the Apply button.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [category]);
 
-  const loadProducts = async () => {
+  async function loadProducts() {
     try {
       setLoading(true);
       const data = await fetchProducts({
@@ -29,7 +31,7 @@ export default function ProductsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }
 
   const handleSearchSubmit = (e) => {
     e.preventDefault();
