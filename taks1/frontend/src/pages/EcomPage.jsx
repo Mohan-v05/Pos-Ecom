@@ -334,8 +334,12 @@ function ProductCard({ product, onAdd, onView }) {
         : "✨";
   return (
     <article className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition hover:-translate-y-1 hover:shadow-lg">
-      <div className="mb-5 grid h-28 place-items-center rounded-xl bg-gradient-to-br from-cyan-50 to-indigo-50 text-4xl">
-        {icon}
+      <div className="mb-5 grid h-28 place-items-center overflow-hidden rounded-xl bg-gradient-to-br from-cyan-50 to-indigo-50 text-4xl">
+        {product.image_url ? (
+          <img src={product.image_url} alt={product.name} className="h-full w-full object-cover" />
+        ) : (
+          icon
+        )}
       </div>
       <p className="text-xs font-bold uppercase tracking-wider text-cyan-700">
         {product.category}

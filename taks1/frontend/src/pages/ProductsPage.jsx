@@ -4,6 +4,7 @@ import {
   createProduct,
   deleteProduct,
   fetchProducts,
+  uploadProductImage,
   updateProduct,
 } from "../services/api";
 
@@ -49,8 +50,11 @@ export default function ProductsPage() {
         price: Number(form.price),
         stock: Number(form.stock),
       };
-      if (form.id) await updateProduct(form.id, payload);
-      else await createProduct(payload);
+      delete payload.imageFile;
+      const savedProduct = form.id
+        ? await updateProduct(form.id, payload)
+        : await createProduct(payload);
+      if (form.imageFile) await uploadProductImage(savedProduct.id, form.imageFile);
       setForm(null);
       setMessage("Inventory saved successfully.");
       await load();
@@ -262,6 +266,22 @@ export default function ProductsPage() {
                   className="mt-1 w-full rounded-xl border border-slate-200 p-3 font-normal"
                 />
               </label>
+              <label className="sm:col-span-2 text-sm font-bold">
+                Product image <span className="font-normal text-slate-400">(optional: JPG, PNG, or WebP; max 5 MB)</span>
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={(event) => setForm({ ...form, imageFile: event.target.files?.[0] || null })}
+                  className="mt-1 block w-full rounded-xl border border-slate-200 p-3 font-normal text-sm"
+                />
+              </label>
+              {(form.imageFile || form.image_url) && (
+                <img
+                  src={form.imageFile ? URL.createObjectURL(form.imageFile) : form.image_url}
+                  alt="Product preview"
+                  className="sm:col-span-2 h-36 w-full rounded-xl object-cover"
+                />
+              )}
             </div>
             <button
               disabled={busy}

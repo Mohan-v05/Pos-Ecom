@@ -1,7 +1,15 @@
 const express = require('express');
+const crypto = require('crypto');
+const multer = require('multer');
 const router = express.Router();
 const supabase = require('../supabaseClient');
 const { releaseExpiredReservations } = require('../services/orderService');
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, callback) => callback(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)),
+});
 
 // CREATE: Add a new product
 router.post('/', async (req, res) => {
@@ -113,6 +121,32 @@ router.delete('/:id', async (req, res) => {
   if (!data || data.length === 0) return res.status(404).json({ error: 'Product not found' });
 
   res.status(200).json({ message: 'Product deactivated successfully' });
+});
+
+// Upload an optional catalog image. The file itself lives in Supabase Storage;
+// the product table stores only its public URL and Storage path.
+router.post('/:id/image', upload.single('image'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Upload a JPEG, PNG, or WebP image under 5 MB.' });
+  const { data: product, error: productError } = await supabase.from('products').select('id, image_path').eq('id', req.params.id).single();
+  if (productError || !product) return res.status(404).json({ error: 'Product not found.' });
+  const extension = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[req.file.mimetype];
+  const imagePath = `products/${product.id}/${crypto.randomUUID()}.${extension}`;
+  const { error: uploadError } = await supabase.storage.from('product-images').upload(imagePath, req.file.buffer, { contentType: req.file.mimetype, cacheControl: '3600', upsert: false });
+  if (uploadError) return res.status(400).json({ error: uploadError.message });
+  const { data: urlData } = supabase.storage.from('product-images').getPublicUrl(imagePath);
+  const { data, error } = await supabase.from('products').update({ image_url: urlData.publicUrl, image_path: imagePath, updated_at: new Date().toISOString() }).eq('id', product.id).select().single();
+  if (error) return res.status(400).json({ error: error.message });
+  if (product.image_path) await supabase.storage.from('product-images').remove([product.image_path]);
+  res.json(data);
+});
+
+router.delete('/:id/image', async (req, res) => {
+  const { data: product, error } = await supabase.from('products').select('image_path').eq('id', req.params.id).single();
+  if (error || !product) return res.status(404).json({ error: 'Product not found.' });
+  if (product.image_path) await supabase.storage.from('product-images').remove([product.image_path]);
+  const { data, error: updateError } = await supabase.from('products').update({ image_url: null, image_path: null, updated_at: new Date().toISOString() }).eq('id', req.params.id).select().single();
+  if (updateError) return res.status(400).json({ error: updateError.message });
+  res.json(data);
 });
 
 module.exports = router;

@@ -18,6 +18,9 @@ CREATE TABLE products (
     category        VARCHAR(100),
     price           NUMERIC(10, 2) NOT NULL CHECK (price >= 0),
     stock           INTEGER NOT NULL CHECK (stock >= 0),
+    is_active       BOOLEAN NOT NULL DEFAULT true,
+    image_url       TEXT,
+    image_path      TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
