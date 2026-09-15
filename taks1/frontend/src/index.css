@@ -1,1 +1,9 @@
 @import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", "Segoe UI", sans-serif;
+}
+
+html { background: #f8fafc; }
+body { min-width: 320px; }
+button, select, input { font: inherit; }

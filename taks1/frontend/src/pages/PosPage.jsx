@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { fetchProducts, createPosOrder, reservePosStock, processPosPayment } from '../services/api';
 import {
   ShoppingCart,
@@ -27,17 +27,17 @@ export default function PosPage() {
     loadProducts();
   }, []);
 
-  const loadProducts = async () => {
+  async function loadProducts() {
     try {
       setCatalogLoading(true);
       const data = await fetchProducts();
       setProducts(data);
-    } catch (err) {
+    } catch {
       setErrorMsg('Failed to load product catalog.');
     } finally {
       setCatalogLoading(false);
     }
-  };
+  }
 
   const addToCart = (product) => {
     setErrorMsg('');
