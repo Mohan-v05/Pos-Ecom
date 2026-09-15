@@ -13,6 +13,12 @@ export const fetchProductById = async (id) => (await api.get(`/products/${id}`))
 export const createProduct = async (product) => (await api.post('/products', product)).data;
 export const updateProduct = async (id, product) => (await api.put(`/products/${id}`, product)).data;
 export const deleteProduct = async (id) => (await api.delete(`/products/${id}`)).data;
+export const uploadProductImage = async (id, image) => {
+  const formData = new FormData();
+  formData.append('image', image);
+  return (await api.post(`/products/${id}/image`, formData, { headers: { 'Content-Type': 'multipart/form-data' } })).data;
+};
+export const removeProductImage = async (id) => (await api.delete(`/products/${id}/image`)).data;
 
 // POS Channel (Task 01)
 export const createPosOrder = async (userId, items) => (await api.post('/task01/orders', { user_id: userId, items })).data;
